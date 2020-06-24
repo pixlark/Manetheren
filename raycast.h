@@ -26,24 +26,28 @@ public:
     void set(int x, int y, bool val);
     bool get(int x, int y);
     v2 nextBoundary(v2 pos, v2 dir);
-    v2 wallBoundary(v2 pos, v2 dir);
-    void renderTopDown(SDL_Surface* surface, int render_size);
+    v2 wallBoundary(v2 pos, v2 dir, bool* world_edge = nullptr);
 };
 
 struct Engine;
 
 struct Game {
 private:
+    const float fov_degrees = 90.0;
+    const float fov = fov_degrees * M_PI / 180.0;
+    const float half_fov = fov / 2.0;
     Engine* engine;
     World world;
     v2 player;
-    float angle; // Radians
+    float view_angle; // Radians
 
 public:
     Game(Engine* engine);
     Game(const Game&) = default;
     ~Game() = default;
     void update();
+    void render3D(SDL_Surface* surface, int width, int height);
+    void renderTopDown(SDL_Surface* surface, int size);
     void render();
 };
 

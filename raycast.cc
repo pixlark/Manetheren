@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #include <SDL2/SDL.h>
 
@@ -39,7 +40,7 @@ static void draw_line(SDL_Surface* surface, uint32_t color, int x1, int y1, int 
 
     auto put_pixel =
         [&](int x, int y) {
-            if (x > 0 && x <= surface->w && y > 0 && y <= surface->h) {
+            if (x >= 0 && x < surface->w && y >= 0 && y < surface->h) {
                 pixels[x + y * surface->w] = color;
             }
         };
@@ -187,11 +188,16 @@ World::~World() {
 }
 
 void World::set(int x, int y, bool val) {
-    walls[x + width * y] = val;
+    if (x >= 0 && x < width && y >= 0 && y < height) {
+        walls[x + width * y] = val;
+    }
 }
 
 bool World::get(int x, int y) {
-    return walls[x + width * y];
+    if (x >= 0 && x < width && y >= 0 && y < height) {
+        return walls[x + width * y];
+    }
+    return false;
 }
 
 v2 World::nextBoundary(v2 pos, v2 dir) {
@@ -219,63 +225,24 @@ v2 World::nextBoundary(v2 pos, v2 dir) {
     return xb_dist < yb_dist ? x_boundary : y_boundary;
 }
 
-v2 World::wallBoundary(v2 pos, v2 dir) {
+v2 World::wallBoundary(v2 pos, v2 dir, bool* world_edge) {
     while (pos.x >= 0 && pos.x < width && pos.y >= 0 && pos.y < height) {
         v2 boundary = nextBoundary(pos, dir);
         // Go slightly into the block we're facing so we can floor()
         v2 test_pos = boundary + dir * 0.01;
         int x = floor(test_pos.x), y = floor(test_pos.y);
         if (get(x, y)) {
+            if (world_edge != nullptr) {
+                *world_edge = false;
+            }
             return boundary;
         }
         pos = test_pos;
     }
+    if (world_edge != nullptr) {
+        *world_edge = true;
+    }
     return pos;
-}
-
-void World::renderTopDown(SDL_Surface* surface, int render_size) {
-    int box_width  = render_size / width,
-        box_height = render_size / height;
-    // Boxes
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            SDL_Rect rect;
-            rect.x = x * box_width;
-            rect.y = y * box_height;
-            rect.w = box_width;
-            rect.h = box_height;
-            SDL_FillRect(
-                surface, &rect,
-                get(x, y)
-                  ? SDL_MapRGB(surface->format, 0xff, 0, 0)
-                  : SDL_MapRGB(surface->format, 0, 0, 0)
-            );
-        }
-    }
-    // Grid
-    for (int i = 0; i < height; i++) {
-        { // Horizontal
-            SDL_Rect rect;
-            rect.x = 0;
-            rect.y = i * box_height;
-            rect.w = render_size;
-            rect.h = 1;
-            SDL_FillRect(
-                surface, &rect, SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
-            );
-        }
-        {
-            // Vertical
-            SDL_Rect rect;
-            rect.x = i * box_width;
-            rect.y = 0;
-            rect.w = 1;
-            rect.h = render_size;
-            SDL_FillRect(
-                surface, &rect, SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
-            );
-        }
-    }
 }
 
 //
@@ -283,7 +250,7 @@ void World::renderTopDown(SDL_Surface* surface, int render_size) {
 //
 
 Game::Game(Engine* engine)
-    : engine(engine), world(15, 15), player(v2(3.2, 3.2)), angle(0.0)
+    : engine(engine), world(15, 15), player(v2(3.2, 3.2)), view_angle(0.0)
 {
     world.set(6, 6, true);
     world.set(6, 7, true);
@@ -307,33 +274,85 @@ void Game::update() {
         dir += engine->input->keyDown(SDL_SCANCODE_RIGHT) ? +1.0 : 0.0;
         dir += engine->input->keyDown(SDL_SCANCODE_LEFT)  ? -1.0 : 0.0;
         const float speed = 2.0;
-        angle += dir * speed * engine->delta;
+        view_angle += dir * speed * engine->delta;
     }
 }
 
-void Game::render() {
-    // Top-down view
-    {
-        // Walls
-        int size = engine->height;
-        SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
-            0, size, size, sizeof(uint32_t) * 8, engine->canvas->format->format
-        );
-        world.renderTopDown(surface, size);
-        
-        { // Player
-            const int radius = 10;
-            SDL_Rect rect;
-            rect.x = (player.x / world.width)  * size - radius;
-            rect.y = (player.y / world.height) * size - radius;
-            rect.w = radius * 2 + 1;
-            rect.h = radius * 2 + 1;
-            SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0, 0xc3, 0xff));
-        }
+void Game::render3D(SDL_Surface* surface, int width, int height) {
+    float left_view = view_angle - half_fov;
+    float rads_per_pixel = fov / width;
+    
+    for (int x = 0; x < width; x++) {
+        float angle = left_view + x * rads_per_pixel;
+        v2 dir(cos(angle), sin(angle));
+        bool world_edge;
+        v2 boundary = world.wallBoundary(player, dir, &world_edge);
+        float dist = (boundary - player).size();
+        float r = (height / 2) / (dist + 1.0);
 
-        // Sight
+        SDL_Rect dest;
+        dest.x = x;
+        dest.y = (height / 2) - r;
+        dest.w = 1;
+        dest.h = r * 2;
+        SDL_FillRect(
+            surface, &dest,
+            world_edge
+              ? SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
+              : SDL_MapRGB(surface->format, 0xff, 0, 0)
+        );
+    }
+}
+
+void Game::renderTopDown(SDL_Surface* surface, int size) {
+    int box_size = size / world.height;
+    
+    // Boxes
+    for (int y = 0; y < world.height; y++) {
+        for (int x = 0; x < world.width; x++) {
+            SDL_Rect rect;
+            rect.x = x * box_size;
+            rect.y = y * box_size;
+            rect.w = box_size;
+            rect.h = box_size;
+            SDL_FillRect(
+                surface, &rect,
+                world.get(x, y)
+                  ? SDL_MapRGB(surface->format, 0xff, 0, 0)
+                  : SDL_MapRGB(surface->format, 0, 0, 0)
+            );
+        }
+    }
+    
+    // Grid
+    for (int i = 0; i < world.height; i++) {
+        { // Horizontal
+            SDL_Rect rect;
+            rect.x = 0;
+            rect.y = i * box_size;
+            rect.w = size;
+            rect.h = 1;
+            SDL_FillRect(
+                surface, &rect, SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
+            );
+        }
         {
-            auto dir = v2(cos(angle), sin(angle));
+            // Vertical
+            SDL_Rect rect;
+            rect.x = i * box_size;
+            rect.y = 0;
+            rect.w = 1;
+            rect.h = size;
+            SDL_FillRect(
+                surface, &rect, SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
+            );
+        }
+    }
+
+    // Sight
+    auto line_at_angle =
+        [&] (uint32_t color, float theta) {
+            auto dir = v2(cos(theta), sin(theta));
             v2 start = player;
             v2 end = world.wallBoundary(start, dir);
             
@@ -342,18 +361,59 @@ void Game::render() {
                 x2 = (end.x   / world.width)  * size,
                 y2 = (end.y   / world.height) * size;
             draw_line(
-                surface, SDL_MapRGB(surface->format, 0, 0xff, 0),
+                surface, color,
                 x1, y1, x2, y2
             );
-        }
+        };
+    line_at_angle(SDL_MapRGB(surface->format, 0, 0xff, 0), view_angle - half_fov);
+    line_at_angle(SDL_MapRGB(surface->format, 0xff, 0xff, 0xff), view_angle);
+    line_at_angle(SDL_MapRGB(surface->format, 0, 0xff, 0), view_angle + half_fov);
 
-        // Finish
+    { // Player
+        const int radius = 10;
+        SDL_Rect rect;
+        rect.x = (player.x / world.width)  * size - radius;
+        rect.y = (player.y / world.height) * size - radius;
+        rect.w = radius * 2 + 1;
+        rect.h = radius * 2 + 1;
+        SDL_FillRect(surface, &rect, SDL_MapRGB(surface->format, 0, 0xc3, 0xff));
+    }
+}
+
+void Game::render() {
+    // 3D view
+    {
+        int size = engine->height;
+        SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+            0, size, size, sizeof(uint32_t) * 8, engine->canvas->format->format
+        );
+
+        render3D(surface, size, size);
+
+        SDL_Rect dest;
+        dest.x = 0;
+        dest.y = 0;
+        dest.w = size;
+        dest.h = size;
+        SDL_BlitSurface(surface, nullptr, engine->canvas, &dest);
+        SDL_FreeSurface(surface);
+    }
+    // Top-down view
+    {
+        int size = engine->height;
+        SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormat(
+            0, size, size, sizeof(uint32_t) * 8, engine->canvas->format->format
+        );
+        
+        renderTopDown(surface, size);
+        
         SDL_Rect dest;
         dest.x = engine->width - size;
         dest.y = 0;
         dest.w = size;
         dest.h = size;
         SDL_BlitSurface(surface, nullptr, engine->canvas, &dest);
+        SDL_FreeSurface(surface);
     }
 }
 
@@ -404,6 +464,10 @@ bool Engine::frame() {
         }
     }
 
+    if (input->keyPressed(SDL_SCANCODE_ESCAPE)) {
+        return false;
+    }
+    
     // Update
     game.update();
 
@@ -422,7 +486,13 @@ bool Engine::frame() {
     const float max_fps = 60.0;
     if (delta < 1.0 / max_fps) {
         float remaining_time = (1.0 / max_fps) - delta;
-        SDL_Delay(remaining_time * 1000);
+
+        const uint64_t one_billion = 1000000000;
+        uint64_t nanoseconds = (uint64_t) (delta * ((float) one_billion));
+        struct timespec t;
+        t.tv_sec  = nanoseconds / one_billion;
+        t.tv_nsec = nanoseconds % one_billion;
+        nanosleep(&t, nullptr);
     }
 
     return true;
