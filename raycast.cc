@@ -6,6 +6,7 @@
 #include <time.h>
 
 #include <SDL2/SDL.h>
+#include <SDL2/SDL_ttf.h>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -112,7 +113,6 @@ static SDL_Surface* loadSurface(const char* path, uint32_t format) {
     SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(
         pixels, w, h, 4 * 8, w * 4, format
     );
-    printf("--- %d %d\n", surface->w, surface->h);
     return surface;
 }
 
@@ -165,6 +165,9 @@ void v2::operator /=(float f) {
 Input::Input() {
     keyboard_state = SDL_GetKeyboardState(&num_keys);
     last_frame_snapshot = new uint8_t[num_keys];
+
+    mouse_state = SDL_GetMouseState(nullptr, nullptr);
+    
     resetCache();
 }
 
@@ -174,6 +177,9 @@ Input::~Input() {
 
 void Input::resetCache() {
     memcpy(last_frame_snapshot, keyboard_state, sizeof(uint8_t) * num_keys);
+    
+    last_mouse_state = mouse_state;
+    mouse_state = SDL_GetMouseState(nullptr, nullptr);
 }
 
 bool Input::keyPressed(SDL_Scancode code) {
@@ -186,6 +192,24 @@ bool Input::keyDown(SDL_Scancode code) {
 
 bool Input::keyUp(SDL_Scancode code) {
     return !keyboard_state[code] && last_frame_snapshot[code];
+}
+
+bool Input::btnPressed(uint8_t btn) {
+    return (mouse_state & SDL_BUTTON(btn)) && !(last_mouse_state & SDL_BUTTON(btn));
+}
+
+bool Input::btnDown(uint8_t btn) {
+    return (mouse_state & SDL_BUTTON(btn));
+}
+
+bool Input::btnUp(uint8_t btn) {
+    return !(mouse_state & SDL_BUTTON(btn)) && (last_mouse_state & SDL_BUTTON(btn));
+}
+
+v2 Input::mousePos() {
+    int mx, my;
+    SDL_GetMouseState(&mx, &my);
+    return v2((float) mx, (float) my);
 }
 
 //
@@ -271,7 +295,7 @@ v2 World::wallBoundary(v2 pos, v2 dir, WallInfo* wall_info) {
 //
 
 Game::Game(Engine* engine)
-    : engine(engine), world(15, 15), player(v2(3.2, 3.2)), view_angle(0.0)
+    : engine(engine), world(15, 15), player(v2(4.778035, 0.495602)), view_angle(-0.667112)
 {
     world.set(6, 6, true);
     world.set(6, 7, true);
@@ -290,13 +314,21 @@ Game::~Game() {
 
 void Game::update() {
     { // Move player
-        auto d = v2(0, 0);
-        d.x += engine->input->keyDown(SDL_SCANCODE_A) ? -1.0 : 0.0;
-        d.x += engine->input->keyDown(SDL_SCANCODE_D) ? +1.0 : 0.0;
-        d.y += engine->input->keyDown(SDL_SCANCODE_W) ? -1.0 : 0.0;
-        d.y += engine->input->keyDown(SDL_SCANCODE_S) ? +1.0 : 0.0;
+        v2 dir = v2(0, 0);
+        dir.x += engine->input->keyDown(SDL_SCANCODE_A) ? -1.0 : 0.0;
+        dir.x += engine->input->keyDown(SDL_SCANCODE_D) ? +1.0 : 0.0;
+        dir.y += engine->input->keyDown(SDL_SCANCODE_W) ? -1.0 : 0.0;
+        dir.y += engine->input->keyDown(SDL_SCANCODE_S) ? +1.0 : 0.0;
+
+        // Rotate vector
+        float theta = view_angle + M_PI / 2.0;
+        v2 rotated = v2(
+            dir.x * cos(theta) - dir.y * sin(theta),
+            dir.x * sin(theta) + dir.y * cos(theta)
+        );
+        
         const float speed = 5.0;
-        player += d * speed * engine->delta;
+        player += rotated * speed * engine->delta;
     }
     { // Rotate player
         float dir = 0.0;
@@ -304,6 +336,28 @@ void Game::update() {
         dir += engine->input->keyDown(SDL_SCANCODE_LEFT)  ? -1.0 : 0.0;
         const float speed = 2.0;
         view_angle += dir * speed * engine->delta;
+    }
+    { // Hotkeys
+        if (engine->input->keyPressed(SDL_SCANCODE_P)) {
+            projection = (ProjectionType) (((int) projection + 1) % (int) PROJ_COUNT);
+        }
+        if (engine->input->keyPressed(SDL_SCANCODE_DOWN)) {
+            plane_distance /= 2.0;
+        }
+        if (engine->input->keyPressed(SDL_SCANCODE_UP)) {
+            plane_distance *= 2.0;
+        }        
+    }
+    { // Add/remove tiles
+        if (engine->input->btnPressed(SDL_BUTTON_LEFT)) {
+            v2 mpos = engine->input->mousePos();
+            int x_start = engine->width / 2;
+            if (mpos.x > x_start) {
+                int x = floor((mpos.x - x_start) / ((engine->width / 2) / world.width)),
+                    y = floor(mpos.y / (engine->height / world.height));
+                world.set(x, y, !world.get(x, y));
+            }
+        }
     }
 }
 
@@ -317,7 +371,15 @@ void Game::render3D(SDL_Surface* surface, int width, int height) {
         WallInfo wall_info(HORIZONTAL, WALL_OUTER);
         v2 boundary = world.wallBoundary(player, dir, &wall_info);
         float dist = (boundary - player).size();
-        float r = (height / 2) / (dist + 1.0);
+        if (projection == COSINE || projection == COSINE_CLIPPING) {
+            // Compensate for fisheye with cosine
+            dist *= cos(abs(view_angle - angle));
+        }
+        if (projection == CLIPPING_PLANE || projection == COSINE_CLIPPING) {
+            // Project onto plane
+            dist -= plane_distance / cos(abs(view_angle - angle));
+        }
+        float r = (height / (dist * 2)) * plane_distance;
 
         SDL_Rect dest;
         dest.x = x;
@@ -340,19 +402,10 @@ void Game::render3D(SDL_Surface* surface, int width, int height) {
         src.y = 0;
         src.w = 1;
         src.h = texture->h;
-
+        
         SDL_BlitScaled(
             texture, &src, surface, &dest
         );
-        
-        // Dumb fill
-            /*
-        SDL_FillRect(
-            surface, &dest,
-            wall_info.type == WALL_OUTER
-            ? SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
-            : SDL_MapRGB(surface->format, 0xff, 0, 0)
-            );*/
     }
 }
 
@@ -367,16 +420,23 @@ void Game::renderTopDown(SDL_Surface* surface, int size) {
             rect.y = y * box_size;
             rect.w = box_size;
             rect.h = box_size;
-            SDL_FillRect(
-                surface, &rect,
-                world.get(x, y)
-                ? SDL_MapRGB(surface->format, 0xff, 0, 0)
-                : SDL_MapRGB(surface->format, 0, 0, 0)
-            );
+            
+            if (world.get(x, y)) {
+                SDL_BlitScaled(
+                    dark_wall, nullptr,
+                    surface, &rect
+                );
+            } else {
+                SDL_FillRect(
+                    surface, &rect,
+                    SDL_MapRGB(surface->format, 0, 0, 0)
+                );
+            }
         }
     }
     
     // Grid
+    auto line_color = SDL_MapRGB(surface->format, 0x90, 0x90, 0x90);
     for (int i = 0; i < world.height; i++) {
         { // Horizontal
             SDL_Rect rect;
@@ -385,7 +445,7 @@ void Game::renderTopDown(SDL_Surface* surface, int size) {
             rect.w = size;
             rect.h = 1;
             SDL_FillRect(
-                surface, &rect, SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
+                surface, &rect, line_color
             );
         }
         {
@@ -396,7 +456,7 @@ void Game::renderTopDown(SDL_Surface* surface, int size) {
             rect.w = 1;
             rect.h = size;
             SDL_FillRect(
-                surface, &rect, SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
+                surface, &rect, line_color
             );
         }
     }
@@ -467,6 +527,32 @@ void Game::render() {
         SDL_BlitSurface(surface, nullptr, engine->canvas, &dest);
         SDL_FreeSurface(surface);
     }
+    // Info text
+    {
+        const char* proj_text;
+        switch (projection) {
+        case NO_COMPENSATION:
+            proj_text = "No compensation";
+            break;
+        case COSINE:
+            proj_text = "Cosine compensation";
+            break;
+        case CLIPPING_PLANE:
+            proj_text = "Clipping plane compensation";
+            break;
+        case COSINE_CLIPPING:
+            proj_text = "Both at once";
+            break;
+        case PROJ_COUNT:
+            proj_text = "Error";
+            break;
+        }
+        engine->renderText(proj_text, 0, 0);
+
+        char buf[512];
+        sprintf(buf, "%.3f", plane_distance);
+        engine->renderText(buf, 0, 30);
+    }
 }
 
 //
@@ -483,6 +569,16 @@ Engine::Engine(const char* title, int width, int height) {
         fatal(SDL_GetError());
     }
 
+    err = TTF_Init();
+    if (err != 0) {
+        fatal(TTF_GetError());
+    }
+
+    font = TTF_OpenFont("res/VGA8.ttf", 26);
+    if (font == nullptr) {
+        fatal(TTF_GetError());
+    }
+    
     window = SDL_CreateWindow(
         title, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
         width, height, SDL_WINDOW_SHOWN
@@ -490,7 +586,7 @@ Engine::Engine(const char* title, int width, int height) {
     if (window == nullptr) {
         fatal(SDL_GetError());
     }
-            
+    
     canvas = SDL_GetWindowSurface(window);
             
     last_tick = SDL_GetPerformanceCounter();
@@ -511,7 +607,20 @@ Engine::~Engine() {
     SDL_Quit();
 }
 
+void Engine::renderText(const char* text, int x, int y) {
+    SDL_Surface* surface = TTF_RenderText_Solid(font, text, {0xff, 0xff, 0xff});
+    SDL_Rect rect;
+    rect.x = x;
+    rect.y = y;
+    rect.w = surface->w;
+    rect.h = surface->h;
+    SDL_BlitSurface(surface, nullptr, canvas, &rect);
+    SDL_FreeSurface(surface);
+}
+
 bool Engine::frame() {
+    input->resetCache();
+    
     // Consume events
     SDL_Event sdl_event;
     while (SDL_PollEvent(&sdl_event) != 0) {
@@ -519,7 +628,7 @@ bool Engine::frame() {
             return false;
         }
     }
-
+    
     if (input->keyPressed(SDL_SCANCODE_ESCAPE)) {
         return false;
     }

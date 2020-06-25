@@ -47,12 +47,21 @@ public:
 
 struct Engine;
 
+enum ProjectionType {
+    NO_COMPENSATION,
+    COSINE,
+    CLIPPING_PLANE,
+    COSINE_CLIPPING,
+    PROJ_COUNT,
+};
+
+static float fov_degrees = 60.0;
+static float fov = fov_degrees * M_PI / 180.0;
+static float half_fov = fov / 2.0;
+static float plane_distance = 1.0;
+
 struct Game {
-private:
-    static constexpr float fov_degrees = 90.0;
-    static constexpr float fov = fov_degrees * M_PI / 180.0;
-    static constexpr float half_fov = fov / 2.0;
-    
+private:    
     Engine* engine;
     World world;
     v2 player;
@@ -60,6 +69,8 @@ private:
 
     SDL_Surface* dark_wall;
     SDL_Surface* light_wall;
+
+    ProjectionType projection = COSINE;
 
 public:
     Game(Engine* engine);
@@ -76,6 +87,8 @@ private:
     int num_keys;
     const uint8_t* keyboard_state;
     uint8_t* last_frame_snapshot;
+    uint32_t mouse_state;
+    uint32_t last_mouse_state;
 
 public:
     Input();
@@ -85,6 +98,10 @@ public:
     bool keyPressed(SDL_Scancode code);
     bool keyDown(SDL_Scancode code);
     bool keyUp(SDL_Scancode code);
+    bool btnPressed(uint8_t btn);
+    bool btnDown(uint8_t btn);
+    bool btnUp(uint8_t btn);
+    v2 mousePos();
 };
 
 struct Engine {
@@ -92,6 +109,7 @@ struct Engine {
     float delta;
     int width, height;
     Input* input;
+    TTF_Font* font;
 
 private:
     SDL_Window* window;
@@ -101,5 +119,6 @@ private:
 public:
     Engine(const char* title, int width, int height);
     ~Engine();
+    void renderText(const char* title, int x, int y);
     bool frame();
 };
