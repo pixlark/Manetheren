@@ -47,14 +47,6 @@ public:
 
 struct Engine;
 
-enum ProjectionType {
-    NO_COMPENSATION,
-    COSINE,
-    CLIPPING_PLANE,
-    COSINE_CLIPPING,
-    PROJ_COUNT,
-};
-
 static float fov_degrees = 60.0;
 static float fov = fov_degrees * M_PI / 180.0;
 static float half_fov = fov / 2.0;
@@ -66,11 +58,11 @@ private:
     World world;
     v2 player;
     float view_angle; // Radians
+    bool mouse_control = false;
 
     SDL_Surface* dark_wall;
     SDL_Surface* light_wall;
-
-    ProjectionType projection = COSINE;
+    SDL_Surface* sky;
 
 public:
     Game(Engine* engine);
@@ -83,6 +75,8 @@ public:
 };
 
 struct Input {
+    v2 motion = {0, 0};
+    
 private:
     int num_keys;
     const uint8_t* keyboard_state;

@@ -110,10 +110,24 @@ static SDL_Surface* loadSurface(const char* path, uint32_t format) {
     if (pixels == nullptr) {
         fatal("Could not load resource at '%s'", path);
     }
-    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(
-        pixels, w, h, 4 * 8, w * 4, format
+    SDL_Surface* original = SDL_CreateRGBSurfaceWithFormatFrom(
+        pixels, w, h, 4 * 8, w * 4, SDL_PIXELFORMAT_RGBA32
     );
-    return surface;
+    SDL_PixelFormat* correct_format = SDL_AllocFormat(format);
+
+    SDL_Surface* converted = SDL_ConvertSurface(original, correct_format, 0);
+    
+    SDL_FreeFormat(correct_format);
+    SDL_FreeSurface(original);
+    return converted;
+}
+
+static float clamp_angle(float theta) {
+    theta = fmod(theta, 2 * M_PI);
+    if (theta < 0) {
+        theta += 2 * M_PI;
+    }
+    return theta;
 }
 
 //
@@ -180,6 +194,8 @@ void Input::resetCache() {
     
     last_mouse_state = mouse_state;
     mouse_state = SDL_GetMouseState(nullptr, nullptr);
+
+    motion = v2(0, 0);
 }
 
 bool Input::keyPressed(SDL_Scancode code) {
@@ -274,7 +290,7 @@ v2 World::wallBoundary(v2 pos, v2 dir, WallInfo* wall_info) {
     while (pos.x >= 0 && pos.x < width && pos.y >= 0 && pos.y < height) {
         v2 boundary = nextBoundary(pos, dir, &hit_dir);
         // Go slightly into the block we're facing so we can floor()
-        v2 test_pos = boundary + dir * 0.01;
+        v2 test_pos = boundary + dir * 0.0001;
         int x = floor(test_pos.x), y = floor(test_pos.y);
         if (get(x, y)) {
             if (wall_info != nullptr) {
@@ -305,11 +321,13 @@ Game::Game(Engine* engine)
 
     dark_wall  = loadSurface("res/dark-wall.bmp", engine->canvas->format->format);
     light_wall = loadSurface("res/light-wall.bmp", engine->canvas->format->format);
+    sky        = loadSurface("res/cloud.bmp", engine->canvas->format->format);
 }
 
 Game::~Game() {
     SDL_FreeSurface(dark_wall);
     SDL_FreeSurface(light_wall);
+    SDL_FreeSurface(sky);
 }
 
 void Game::update() {
@@ -334,22 +352,39 @@ void Game::update() {
         float dir = 0.0;
         dir += engine->input->keyDown(SDL_SCANCODE_RIGHT) ? +1.0 : 0.0;
         dir += engine->input->keyDown(SDL_SCANCODE_LEFT)  ? -1.0 : 0.0;
+
+        if (mouse_control) {
+            float amt = engine->input->motion.x;
+            const float sensitivity = 0.2;
+            dir += amt * sensitivity;
+        }
+        
         const float speed = 2.0;
         view_angle += dir * speed * engine->delta;
+        view_angle = clamp_angle(view_angle);
     }
     { // Hotkeys
-        if (engine->input->keyPressed(SDL_SCANCODE_P)) {
-            projection = (ProjectionType) (((int) projection + 1) % (int) PROJ_COUNT);
-        }
         if (engine->input->keyPressed(SDL_SCANCODE_DOWN)) {
-            plane_distance /= 2.0;
+            fov_degrees -= 5.0;
         }
         if (engine->input->keyPressed(SDL_SCANCODE_UP)) {
-            plane_distance *= 2.0;
-        }        
+            fov_degrees += 5.0;
+        }
+        fov = fov_degrees * (M_PI / 180.0);
+        half_fov = fov / 2.0;
+
+        if (engine->input->keyPressed(SDL_SCANCODE_SPACE)) {
+            if (mouse_control) {
+                SDL_SetRelativeMouseMode(SDL_FALSE);
+                mouse_control = false;
+            } else {
+                SDL_SetRelativeMouseMode(SDL_TRUE);
+                mouse_control = true;
+            }
+        }
     }
     { // Add/remove tiles
-        if (engine->input->btnPressed(SDL_BUTTON_LEFT)) {
+        if (!mouse_control && engine->input->btnPressed(SDL_BUTTON_LEFT)) {
             v2 mpos = engine->input->mousePos();
             int x_start = engine->width / 2;
             if (mpos.x > x_start) {
@@ -359,9 +394,91 @@ void Game::update() {
             }
         }
     }
+
+    if (mouse_control) {
+        
+    }
 }
 
 void Game::render3D(SDL_Surface* surface, int width, int height) {
+    { // Floor
+        SDL_Rect floor_rect;
+        floor_rect.x = 0;
+        floor_rect.y = height / 2;
+        floor_rect.w = width;
+        floor_rect.h = height / 2;
+        SDL_FillRect(
+            surface, &floor_rect,
+            SDL_MapRGB(surface->format, 0x20, 0x20, 0x20)
+        );
+    }
+    { // Sky
+        float percent_sky_visible = fov / (2 * M_PI);
+
+        if (view_angle - half_fov >= 0 && view_angle + half_fov < 2 * M_PI) {
+            // No tiling necessary
+            SDL_Rect src;
+            src.x = (view_angle - half_fov) / (2 * M_PI) * sky->w;
+            src.y = 0;
+            src.w = sky->w * percent_sky_visible;
+            src.h = sky->h;
+            
+            SDL_Rect dest;
+            dest.x = 0;
+            dest.y = 0;
+            dest.w = width;
+            dest.h = height / 2;
+            
+            SDL_BlitScaled(
+                sky, &src,
+                surface, &dest
+            );    
+        } else {
+            // The crease in the sky is visible, so we tile
+            float left_angle = (2 * M_PI) - clamp_angle(view_angle - half_fov);
+            float right_angle = clamp_angle(view_angle + half_fov);
+            {
+                // Left sky
+                SDL_Rect src;
+                src.x = sky->w - sky->w * percent_sky_visible * (left_angle / fov);
+                src.y = 0;
+                src.w = sky->w * percent_sky_visible * (left_angle / fov);
+                src.h = sky->h;
+
+                SDL_Rect dest;
+                dest.x = 0;
+                dest.y = 0;
+                dest.w = width * (left_angle / fov);
+                dest.h = height / 2;
+
+                SDL_BlitScaled(
+                    sky, &src,
+                    surface, &dest
+                );
+            }
+            {
+                // Right sky
+                SDL_Rect src;
+                src.x = 0;
+                src.y = 0;
+                src.w = sky->w * percent_sky_visible * (right_angle / fov);
+                src.h = sky->h;
+
+                SDL_Rect dest;
+                dest.x = width - (width * (right_angle / fov));
+                dest.y = 0;
+                dest.w = width * (right_angle / fov);
+                dest.h = height / 2;
+
+                SDL_BlitScaled(
+                    sky, &src,
+                    surface, &dest
+                );
+            }
+
+        }
+    }
+    
     float left_view = view_angle - half_fov;
     float rads_per_pixel = fov / width;
     
@@ -370,15 +487,7 @@ void Game::render3D(SDL_Surface* surface, int width, int height) {
         v2 dir(cos(angle), sin(angle));
         WallInfo wall_info(HORIZONTAL, WALL_OUTER);
         v2 boundary = world.wallBoundary(player, dir, &wall_info);
-        float dist = (boundary - player).size();
-        if (projection == COSINE || projection == COSINE_CLIPPING) {
-            // Compensate for fisheye with cosine
-            dist *= cos(abs(view_angle - angle));
-        }
-        if (projection == CLIPPING_PLANE || projection == COSINE_CLIPPING) {
-            // Project onto plane
-            dist -= plane_distance / cos(abs(view_angle - angle));
-        }
+        float dist = (boundary - player).size() * cos(abs(view_angle - angle));
         float r = (height / (dist * 2)) * plane_distance;
 
         SDL_Rect dest;
@@ -529,29 +638,18 @@ void Game::render() {
     }
     // Info text
     {
-        const char* proj_text;
-        switch (projection) {
-        case NO_COMPENSATION:
-            proj_text = "No compensation";
-            break;
-        case COSINE:
-            proj_text = "Cosine compensation";
-            break;
-        case CLIPPING_PLANE:
-            proj_text = "Clipping plane compensation";
-            break;
-        case COSINE_CLIPPING:
-            proj_text = "Both at once";
-            break;
-        case PROJ_COUNT:
-            proj_text = "Error";
-            break;
-        }
-        engine->renderText(proj_text, 0, 0);
-
         char buf[512];
-        sprintf(buf, "%.3f", plane_distance);
+        sprintf(buf, "FOV: %.2f", fov_degrees);
+        engine->renderText(buf, 0, 0);
+
+        sprintf(buf, "ANGLE: %.2f", view_angle * (180.0 / M_PI));
         engine->renderText(buf, 0, 30);
+
+        sprintf(buf, "MOUSE CONTROL: %s", mouse_control ? "ON" : "OFF");
+        engine->renderText(buf, 0, 60);
+
+        sprintf(buf, "MOTION: %3.0f", engine->input->motion.x);
+        engine->renderText(buf, 0, 90);
     }
 }
 
@@ -607,25 +705,37 @@ Engine::~Engine() {
     SDL_Quit();
 }
 
-void Engine::renderText(const char* text, int x, int y) {
-    SDL_Surface* surface = TTF_RenderText_Solid(font, text, {0xff, 0xff, 0xff});
-    SDL_Rect rect;
-    rect.x = x;
-    rect.y = y;
-    rect.w = surface->w;
-    rect.h = surface->h;
-    SDL_BlitSurface(surface, nullptr, canvas, &rect);
-    SDL_FreeSurface(surface);
+void Engine::renderText(const char* msg, int x, int y) {
+    auto blit_text =
+        [&](SDL_Surface* surf, int x_offset, int y_offset) {
+            SDL_Rect rect;
+            rect.x = x + x_offset;
+            rect.y = y + y_offset;
+            rect.w = surf->w;
+            rect.h = surf->h;
+            SDL_BlitSurface(surf, nullptr, canvas, &rect);
+        };
+    
+    SDL_Surface* shadow = TTF_RenderText_Solid(font, msg, {0, 0, 0});
+    SDL_Surface* text   = TTF_RenderText_Solid(font, msg, {0xff, 0xff, 0xff});
+
+    blit_text(shadow, -2, 2);
+    blit_text(text, 0, 0);
+    
+    SDL_FreeSurface(shadow);
+    SDL_FreeSurface(text);
 }
 
 bool Engine::frame() {
     input->resetCache();
     
     // Consume events
-    SDL_Event sdl_event;
-    while (SDL_PollEvent(&sdl_event) != 0) {
-        if (sdl_event.type == SDL_QUIT) {
+    SDL_Event event;
+    while (SDL_PollEvent(&event) != 0) {
+        if (event.type == SDL_QUIT) {
             return false;
+        } else if (event.type == SDL_MOUSEMOTION) {
+            input->motion = v2(event.motion.xrel, event.motion.yrel);
         }
     }
     
