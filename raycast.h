@@ -13,6 +13,22 @@ struct v2 {
     void operator /=(float);
 };
 
+enum Direction {
+    HORIZONTAL,
+    VERTICAL,
+};
+
+enum WallType {
+    WALL_OUTER,
+    WALL_BLOCK,
+};
+
+struct WallInfo {
+    Direction dir;
+    WallType type;
+    WallInfo(Direction dir, WallType type);
+};
+
 struct World {
     int width, height;
     
@@ -25,26 +41,30 @@ public:
     ~World();
     void set(int x, int y, bool val);
     bool get(int x, int y);
-    v2 nextBoundary(v2 pos, v2 dir);
-    v2 wallBoundary(v2 pos, v2 dir, bool* world_edge = nullptr);
+    v2 nextBoundary(v2 pos, v2 dir, Direction* hit_dir = nullptr);
+    v2 wallBoundary(v2 pos, v2 dir, WallInfo* wall_info = nullptr);
 };
 
 struct Engine;
 
 struct Game {
 private:
-    const float fov_degrees = 90.0;
-    const float fov = fov_degrees * M_PI / 180.0;
-    const float half_fov = fov / 2.0;
+    static constexpr float fov_degrees = 90.0;
+    static constexpr float fov = fov_degrees * M_PI / 180.0;
+    static constexpr float half_fov = fov / 2.0;
+    
     Engine* engine;
     World world;
     v2 player;
     float view_angle; // Radians
 
+    SDL_Surface* dark_wall;
+    SDL_Surface* light_wall;
+
 public:
     Game(Engine* engine);
     Game(const Game&) = default;
-    ~Game() = default;
+    ~Game();
     void update();
     void render3D(SDL_Surface* surface, int width, int height);
     void renderTopDown(SDL_Surface* surface, int size);
@@ -76,11 +96,10 @@ struct Engine {
 private:
     SDL_Window* window;
     uint64_t last_tick;
-    Game game;
+    Game* game;
 
 public:
     Engine(const char* title, int width, int height);
-    Engine(const Engine&) = default;
     ~Engine();
     bool frame();
 };

@@ -7,6 +7,9 @@
 
 #include <SDL2/SDL.h>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 #include "raycast.h"
 
 static void fatal(const char * fmt, ...)
@@ -100,6 +103,19 @@ static void draw_line(SDL_Surface* surface, uint32_t color, int x1, int y1, int 
     SDL_UnlockSurface(surface);
 }
 
+static SDL_Surface* loadSurface(const char* path, uint32_t format) {
+    int w, h, c;
+    uint8_t* pixels = stbi_load(path, &w, &h, &c, 4);
+    if (pixels == nullptr) {
+        fatal("Could not load resource at '%s'", path);
+    }
+    SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(
+        pixels, w, h, 4 * 8, w * 4, format
+    );
+    printf("--- %d %d\n", surface->w, surface->h);
+    return surface;
+}
+
 //
 // v2
 //
@@ -180,7 +196,6 @@ World::World(int width, int height)
     : width(width), height(height)
 {
     walls = new bool[width * height]();
-    
 }
 
 World::~World() {
@@ -200,7 +215,7 @@ bool World::get(int x, int y) {
     return false;
 }
 
-v2 World::nextBoundary(v2 pos, v2 dir) {
+v2 World::nextBoundary(v2 pos, v2 dir, Direction* hit_dir) {
     v2 x_boundary(0, 0);
     float xb_dist;
     { // X
@@ -222,25 +237,31 @@ v2 World::nextBoundary(v2 pos, v2 dir) {
         yb_dist = v2(x_delta, y_delta).size();
     }
     // Return the shorter
+    if (hit_dir != nullptr) {
+        *hit_dir = xb_dist < yb_dist ? VERTICAL : HORIZONTAL;
+    }
     return xb_dist < yb_dist ? x_boundary : y_boundary;
 }
 
-v2 World::wallBoundary(v2 pos, v2 dir, bool* world_edge) {
+WallInfo::WallInfo(Direction dir, WallType type) : dir(dir), type(type) {}
+
+v2 World::wallBoundary(v2 pos, v2 dir, WallInfo* wall_info) {
+    Direction hit_dir;
     while (pos.x >= 0 && pos.x < width && pos.y >= 0 && pos.y < height) {
-        v2 boundary = nextBoundary(pos, dir);
+        v2 boundary = nextBoundary(pos, dir, &hit_dir);
         // Go slightly into the block we're facing so we can floor()
         v2 test_pos = boundary + dir * 0.01;
         int x = floor(test_pos.x), y = floor(test_pos.y);
         if (get(x, y)) {
-            if (world_edge != nullptr) {
-                *world_edge = false;
+            if (wall_info != nullptr) {
+                *wall_info = WallInfo(hit_dir, WALL_BLOCK);
             }
             return boundary;
         }
         pos = test_pos;
     }
-    if (world_edge != nullptr) {
-        *world_edge = true;
+    if (wall_info != nullptr) {
+        *wall_info = WallInfo(hit_dir, WALL_OUTER);
     }
     return pos;
 }
@@ -257,6 +278,14 @@ Game::Game(Engine* engine)
     world.set(7, 6, true);
     world.set(8, 6, true);
     world.set(8, 7, true);
+
+    dark_wall  = loadSurface("res/dark-wall.bmp", engine->canvas->format->format);
+    light_wall = loadSurface("res/light-wall.bmp", engine->canvas->format->format);
+}
+
+Game::~Game() {
+    SDL_FreeSurface(dark_wall);
+    SDL_FreeSurface(light_wall);
 }
 
 void Game::update() {
@@ -285,8 +314,8 @@ void Game::render3D(SDL_Surface* surface, int width, int height) {
     for (int x = 0; x < width; x++) {
         float angle = left_view + x * rads_per_pixel;
         v2 dir(cos(angle), sin(angle));
-        bool world_edge;
-        v2 boundary = world.wallBoundary(player, dir, &world_edge);
+        WallInfo wall_info(HORIZONTAL, WALL_OUTER);
+        v2 boundary = world.wallBoundary(player, dir, &wall_info);
         float dist = (boundary - player).size();
         float r = (height / 2) / (dist + 1.0);
 
@@ -295,12 +324,35 @@ void Game::render3D(SDL_Surface* surface, int width, int height) {
         dest.y = (height / 2) - r;
         dest.w = 1;
         dest.h = r * 2;
+
+        // Texture mapping
+        float texture_x =
+            wall_info.dir == HORIZONTAL
+            ? boundary.x - floor(boundary.x)
+            : boundary.y - floor(boundary.y);
+        SDL_Surface* texture =
+            wall_info.type == WALL_OUTER
+            ? light_wall
+            : dark_wall;
+
+        SDL_Rect src;
+        src.x = (int) (texture_x * (float) texture->w);
+        src.y = 0;
+        src.w = 1;
+        src.h = texture->h;
+
+        SDL_BlitScaled(
+            texture, &src, surface, &dest
+        );
+        
+        // Dumb fill
+            /*
         SDL_FillRect(
             surface, &dest,
-            world_edge
-              ? SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
-              : SDL_MapRGB(surface->format, 0xff, 0, 0)
-        );
+            wall_info.type == WALL_OUTER
+            ? SDL_MapRGB(surface->format, 0xff, 0xff, 0xff)
+            : SDL_MapRGB(surface->format, 0xff, 0, 0)
+            );*/
     }
 }
 
@@ -318,8 +370,8 @@ void Game::renderTopDown(SDL_Surface* surface, int size) {
             SDL_FillRect(
                 surface, &rect,
                 world.get(x, y)
-                  ? SDL_MapRGB(surface->format, 0xff, 0, 0)
-                  : SDL_MapRGB(surface->format, 0, 0, 0)
+                ? SDL_MapRGB(surface->format, 0xff, 0, 0)
+                : SDL_MapRGB(surface->format, 0, 0, 0)
             );
         }
     }
@@ -421,13 +473,11 @@ void Game::render() {
 // Engine
 //
 
-Engine::Engine(const char* title, int width, int height)
-    : game(this)
-{
+Engine::Engine(const char* title, int width, int height) {
     this->width = width;
     this->height = height;
 
-    int err;
+    int err = 0;
     err = SDL_Init(SDL_INIT_EVERYTHING);
     if (err != 0) {
         fatal(SDL_GetError());
@@ -446,10 +496,16 @@ Engine::Engine(const char* title, int width, int height)
     last_tick = SDL_GetPerformanceCounter();
     delta = 1.0 / 60.0;
 
+    // There is ZERO reason these should be heap-allocated, but C++
+    // refuses to let me perform the above initialization BEFORE their
+    // constructors are called, no matter what I do. This has me
+    // royally pissed.
+    game = new Game(this);
     input = new Input();
 }
 
 Engine::~Engine() {
+    delete game;
     delete input;
     SDL_DestroyWindow(window);
     SDL_Quit();
@@ -469,11 +525,11 @@ bool Engine::frame() {
     }
     
     // Update
-    game.update();
+    game->update();
 
     // Render
     SDL_FillRect(canvas, nullptr, SDL_MapRGB(canvas->format, 0xff, 0xff, 0xff));
-    game.render();
+    game->render();
     SDL_UpdateWindowSurface(window);
             
     { // Update delta
