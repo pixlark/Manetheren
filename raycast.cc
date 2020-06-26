@@ -16,7 +16,7 @@
 
 #include "raycast.h"
 
-static void fatal(const char * fmt, ...)
+[[ noreturn ]] static void fatal(const char * fmt, ...)
 {
 	va_list args;
 	va_start(args, fmt);
@@ -320,24 +320,24 @@ v2 Input::mousePos() {
 World::World(int width, int height)
     : width(width), height(height)
 {
-    walls = new bool[width * height]();
+    walls = new Block[width * height]();
 }
 
 World::~World() {
     delete[] walls;
 }
 
-void World::set(int x, int y, bool val) {
+void World::set(int x, int y, Block type) {
     if (x >= 0 && x < width && y >= 0 && y < height) {
-        walls[x + width * y] = val;
+        walls[x + width * y] = type;
     }
 }
 
-bool World::get(int x, int y) {
+Block World::get(int x, int y) {
     if (x >= 0 && x < width && y >= 0 && y < height) {
         return walls[x + width * y];
     }
-    return true; // Anything outside of the map is untraversable, so consider it a wall.
+    return OUTER_WALL; // Anything outside of the map is untraversable, so consider it a wall.
 }
 
 v2 World::nextBoundary(v2 pos, v2 dir, Direction* hit_dir) {
@@ -368,7 +368,7 @@ v2 World::nextBoundary(v2 pos, v2 dir, Direction* hit_dir) {
     return xb_dist < yb_dist ? x_boundary : y_boundary;
 }
 
-WallInfo::WallInfo(Direction dir, WallType type) : dir(dir), type(type) {}
+WallInfo::WallInfo(Direction dir, Block type) : dir(dir), type(type) {}
 
 v2 World::wallBoundary(v2 pos, v2 dir, WallInfo* wall_info) {
     Direction hit_dir;
@@ -379,14 +379,14 @@ v2 World::wallBoundary(v2 pos, v2 dir, WallInfo* wall_info) {
         int x = floor(test_pos.x), y = floor(test_pos.y);
         if (get(x, y)) {
             if (wall_info != nullptr) {
-                *wall_info = WallInfo(hit_dir, WALL_BLOCK);
+                *wall_info = WallInfo(hit_dir, get(x, y));
             }
             return boundary;
         }
         pos = test_pos;
     }
     if (wall_info != nullptr) {
-        *wall_info = WallInfo(hit_dir, WALL_OUTER);
+        *wall_info = WallInfo(hit_dir, OUTER_WALL);
     }
     return pos;
 }
@@ -398,11 +398,11 @@ v2 World::wallBoundary(v2 pos, v2 dir, WallInfo* wall_info) {
 Game::Game(Engine* engine)
     : engine(engine), world(15, 15), player(v2(4.778035, 0.495602)), view_angle(-0.667112)
 {
-    world.set(6, 6, true);
-    world.set(6, 7, true);
-    world.set(7, 6, true);
-    world.set(8, 6, true);
-    world.set(8, 7, true);
+    world.set(6, 6, INNER_WALL);
+    world.set(6, 7, INNER_WALL);
+    world.set(7, 6, INNER_WALL);
+    world.set(8, 6, INNER_WALL);
+    world.set(8, 7, INNER_WALL);
 
     dark_wall  = loadSurface("res/dark-wall.bmp", engine->canvas->format->format);
     light_wall = loadSurface("res/light-wall.bmp", engine->canvas->format->format);
@@ -527,7 +527,7 @@ void Game::update() {
             if (mpos.x > x_start) {
                 int x = floor((mpos.x - x_start) / ((engine->width / 2) / world.width)),
                     y = floor(mpos.y / (engine->height / world.height));
-                world.set(x, y, !world.get(x, y));
+                world.set(x, y, world.get(x, y) ? NO_WALL : INNER_WALL);
             }
         }
     }
@@ -618,7 +618,7 @@ void Game::render3D(SDL_Surface* surface, int width, int height) {
     for (int x = 0; x < width; x++) {
         float angle = left_view + x * rads_per_pixel;
         v2 dir(cos(angle), sin(angle));
-        WallInfo wall_info(HORIZONTAL, WALL_OUTER);
+        WallInfo wall_info(HORIZONTAL, OUTER_WALL);
         v2 boundary = world.wallBoundary(player, dir, &wall_info);
         float dist = (boundary - player).size() * cos(abs(view_angle - angle));
         float r = (height / (dist * 2)) * plane_distance;
@@ -634,10 +634,17 @@ void Game::render3D(SDL_Surface* surface, int width, int height) {
             wall_info.dir == HORIZONTAL
             ? boundary.x - floor(boundary.x)
             : boundary.y - floor(boundary.y);
-        SDL_Surface* texture =
-            wall_info.type == WALL_OUTER
-            ? light_wall
-            : dark_wall;
+        SDL_Surface* texture;
+        switch (wall_info.type) {
+        case NO_WALL:
+            fatal("Unreachable");
+        case OUTER_WALL:
+            texture = light_wall;
+            break;
+        case INNER_WALL:
+            texture = dark_wall;
+            break;
+        }
 
         SDL_Rect src;
         src.x = (int) (texture_x * (float) texture->w);
@@ -663,15 +670,26 @@ void Game::renderTopDown(SDL_Surface* surface, int size) {
             rect.w = box_size;
             rect.h = box_size;
             
-            if (world.get(x, y)) {
-                SDL_BlitScaled(
-                    dark_wall, nullptr,
-                    surface, &rect
-                );
-            } else {
+            if (!world.get(x, y)) {
                 SDL_FillRect(
                     surface, &rect,
                     SDL_MapRGB(surface->format, 0, 0, 0)
+                );
+            } else {
+                SDL_Surface* wall;
+                switch (world.get(x, y)) {
+                case NO_WALL:
+                    fatal("Unreachable");
+                case OUTER_WALL:
+                    wall = light_wall;
+                    break;
+                case INNER_WALL:
+                    wall = dark_wall;
+                    break;
+                }
+                SDL_BlitScaled(
+                    wall, nullptr,
+                    surface, &rect
                 );
             }
         }

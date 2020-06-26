@@ -31,29 +31,30 @@ enum Direction {
     VERTICAL,
 };
 
-enum WallType {
-    WALL_OUTER,
-    WALL_BLOCK,
+enum Block {
+    NO_WALL = 0,
+    OUTER_WALL,
+    INNER_WALL,
 };
 
 struct WallInfo {
     Direction dir;
-    WallType type;
-    WallInfo(Direction dir, WallType type);
+    Block type;
+    WallInfo(Direction dir, Block type);
 };
 
 struct World {
     int width, height;
     
 private:
-    bool* walls;
+    Block* walls;
     
 public:
     World(int width, int height);
     World(const World&) = default;
     ~World();
-    void set(int x, int y, bool val);
-    bool get(int x, int y);
+    void set(int x, int y, Block type);
+    Block get(int x, int y);
     v2 nextBoundary(v2 pos, v2 dir, Direction* hit_dir = nullptr);
     v2 wallBoundary(v2 pos, v2 dir, WallInfo* wall_info = nullptr);
 };
