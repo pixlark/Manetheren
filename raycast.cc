@@ -5,6 +5,9 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include <tuple>
+#include <vector>
+
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_ttf.h>
 
@@ -130,6 +133,47 @@ static float clamp_angle(float theta) {
     return theta;
 }
 
+static bool circle_aabb_intersect(v2 c, float r, v2 b1, v2 b2) {
+    float top    = b1.y;
+    float bottom = b2.y;
+    float left   = b1.x;
+    float right  = b2.x;
+
+    bool within_x = c.x >= left && c.x <= right;
+    bool within_y = c.y >= top && c.y <= bottom;
+
+    // Inside
+    if (within_x && within_y) {
+        return true;
+    }
+    // Above/Below
+    if (within_x && !within_y) {
+        return fmin(abs(c.y - top), abs(c.y - bottom)) < r;
+    }
+    // Left/Right
+    if (!within_x && within_y) {
+        return fmin(abs(c.x - left), abs(c.x - right)) < r;
+    }
+    // Top-left?
+    if ((c - b1).size() < r) {
+        return true;
+    }
+    // Top-right?
+    if ((c - v2(right, top)).size() < r) {
+        return true;
+    }
+    // Bottom-left?
+    if ((c - v2(left, bottom)).size() < r) {
+        return true;
+    }
+    // Bottom-right?
+    if ((c - b2).size() < r) {
+        return true;
+    }
+    // No corners are inside circle
+    return false;
+}
+
 //
 // v2
 //
@@ -170,6 +214,47 @@ v2 v2::operator /(float f) {
 
 void v2::operator /=(float f) {
     *this = *this / f;
+}
+
+//
+// Box
+//
+
+Box::Box() : pos(v2(0, 0)), bounds(v2(0, 0)) {}
+
+float Box::top() {
+    return pos.y;
+}
+
+float Box::left() {
+    return pos.x;
+}
+
+float Box::bottom() {
+    return pos.y + bounds.y;
+}
+
+float Box::right() {
+    return pos.x + bounds.x;
+}
+
+v2 Box::center() {
+    return pos + bounds / 2;
+}
+
+Box Box::from_center(v2 center, v2 half_bounds) {
+    Box box;
+    box.pos = center - half_bounds;
+    box.bounds = half_bounds * 2;
+    return box;
+}
+
+bool Box::intersect(Box a, Box b) {
+    return
+		(a.left() < b.right()) &&
+		(a.right() > b.left()) &&
+		(a.top() < b.bottom()) &&
+		(a.bottom() > b.top());
 }
 
 //
@@ -252,7 +337,7 @@ bool World::get(int x, int y) {
     if (x >= 0 && x < width && y >= 0 && y < height) {
         return walls[x + width * y];
     }
-    return false;
+    return true; // Anything outside of the map is untraversable, so consider it a wall.
 }
 
 v2 World::nextBoundary(v2 pos, v2 dir, Direction* hit_dir) {
@@ -332,21 +417,73 @@ Game::~Game() {
 
 void Game::update() {
     { // Move player
-        v2 dir = v2(0, 0);
-        dir.x += engine->input->keyDown(SDL_SCANCODE_A) ? -1.0 : 0.0;
-        dir.x += engine->input->keyDown(SDL_SCANCODE_D) ? +1.0 : 0.0;
-        dir.y += engine->input->keyDown(SDL_SCANCODE_W) ? -1.0 : 0.0;
-        dir.y += engine->input->keyDown(SDL_SCANCODE_S) ? +1.0 : 0.0;
+        v2 inp = v2(0, 0);
+        inp.x += engine->input->keyDown(SDL_SCANCODE_A) ? -1.0 : 0.0;
+        inp.x += engine->input->keyDown(SDL_SCANCODE_D) ? +1.0 : 0.0;
+        inp.y += engine->input->keyDown(SDL_SCANCODE_W) ? -1.0 : 0.0;
+        inp.y += engine->input->keyDown(SDL_SCANCODE_S) ? +1.0 : 0.0;
 
         // Rotate vector
-        float theta = view_angle + M_PI / 2.0;
-        v2 rotated = v2(
-            dir.x * cos(theta) - dir.y * sin(theta),
-            dir.x * sin(theta) + dir.y * cos(theta)
+        // view angle: 0.0 is -->
+        float rotation = view_angle + M_PI / 2.0; // rotation: 0.0 is ^
+        v2 dir = v2(
+            inp.x * cos(rotation) - inp.y * sin(rotation),
+            inp.x * sin(rotation) + inp.y * cos(rotation)
         );
         
         const float speed = 5.0;
-        player += rotated * speed * engine->delta;
+        v2 next = player + dir * speed * engine->delta;
+
+        const float player_radius = 0.25;
+
+        { // Collide
+            int px = floor(player.x), py = floor(player.y);
+            int horiz_x = px + (dir.x > 0 ? 1 : -1),
+                horiz_y = py;
+            int vert_x  = px,
+                vert_y  = py + (dir.y > 0 ? 1 : -1);
+
+            // We resolve collisions by looking at the three blocks in
+            // the direction we are moving. Depending on which we
+            // intersect, we gradually scoot away until we're in a
+            // good spot.
+            const float fudge_factor = 0.001;
+            size_t limit = 500;
+            bool ok;
+            do {
+                ok = true;
+                // Check the block next to us on the X axis. Slide horizontally.
+                if (world.get(horiz_x, horiz_y) &&
+                    circle_aabb_intersect(
+                        next, player_radius,
+                        v2(horiz_x, horiz_y), v2(horiz_x + 1, horiz_y + 1))) {
+                    ok = false;
+                    next.x -= dir.x * fudge_factor;
+                }
+                // Check the block next to us on the Y axis. Slide vertically.
+                if (world.get(vert_x, vert_y) &&
+                    circle_aabb_intersect(
+                        next, player_radius,
+                        v2(vert_x, vert_y), v2(vert_x + 1, vert_y + 1))) {
+                    ok = false;
+                    next.y -= dir.y * fudge_factor;
+                }
+                // If we're NOT intersecting with the blocks
+                // immediately next to us, make sure we're not walking
+                // into the corner of the block diagonal from
+                // us. Slide vertically if we are.
+                if (ok &&
+                    world.get(horiz_x, vert_y) &&
+                    circle_aabb_intersect(
+                        next, player_radius,
+                        v2(horiz_x, vert_y), v2(horiz_x + 1, vert_y + 1))) {
+                    ok = false;
+                    next.y -= dir.y * fudge_factor;
+                }
+                limit--;
+            } while (!ok && limit > 0);
+            player = next;
+        }
     }
     { // Rotate player
         float dir = 0.0;
@@ -393,10 +530,6 @@ void Game::update() {
                 world.set(x, y, !world.get(x, y));
             }
         }
-    }
-
-    if (mouse_control) {
-        
     }
 }
 
@@ -591,7 +724,7 @@ void Game::renderTopDown(SDL_Surface* surface, int size) {
     line_at_angle(SDL_MapRGB(surface->format, 0, 0xff, 0), view_angle + half_fov);
 
     { // Player
-        const int radius = 10;
+        const int radius = box_size * 0.25;
         SDL_Rect rect;
         rect.x = (player.x / world.width)  * size - radius;
         rect.y = (player.y / world.height) * size - radius;

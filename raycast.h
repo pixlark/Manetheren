@@ -13,6 +13,19 @@ struct v2 {
     void operator /=(float);
 };
 
+struct Box {
+    v2 pos;
+    v2 bounds;
+    Box();
+    inline float top();
+    inline float left();
+    inline float bottom();
+    inline float right();
+    inline v2 center();
+    static Box from_center(v2 center, v2 half_bounds);
+    static bool intersect(Box a, Box b);
+};
+
 enum Direction {
     HORIZONTAL,
     VERTICAL,
