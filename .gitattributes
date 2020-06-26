@@ -1,0 +1,3 @@
+# Github linguist
+
+*.h linguist-language=C++
